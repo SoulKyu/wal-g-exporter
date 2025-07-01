@@ -242,6 +242,14 @@ if __name__ == '__main__':
     pg_ssl_mode = os.getenv('PGSSLMODE', 'require')
     wal_g_scrape_interval = int(os.getenv('WAL_G_SCRAPE_INTERVAL', 60))
     s3_metrics_enabled = os.getenv('S3_METRICS_ENABLED', 'true')
+    
+    # Configurable intervals for different metrics
+    basebackup_interval_seconds = int(os.getenv('BASEBACKUP_INTERVAL_SECONDS', 14400))  # 4 hours default
+    wal_verify_interval_seconds = int(os.getenv('WAL_VERIFY_INTERVAL_SECONDS', 1800))   # 30 minutes default
+    
+    # Initialize counters for tracking intervals
+    basebackup_last_run = 0
+    wal_verify_last_run = 0
     first_start = True
 
     # Start up the server to expose the metrics.
@@ -251,6 +259,8 @@ if __name__ == '__main__':
     logging.info("PGUSER %s", pg_user)
     logging.info("PGDATABASE %s", pg_database)
     logging.info("SSLMODE %s", pg_ssl_mode)
+    logging.info("Basebackup interval: %s seconds (%s hours)", basebackup_interval_seconds, basebackup_interval_seconds // 3600)
+    logging.info("WAL verify interval: %s seconds (%s minutes)", wal_verify_interval_seconds, wal_verify_interval_seconds // 60)
 
     logging.info("Starting exporter...")
 
@@ -282,20 +292,38 @@ if __name__ == '__main__':
 
                         if bool(pg_is_primary) and pg_is_primary[0]:
                             logging.info("Connected to primary database")
-                            logging.info("Evaluating wal-g backups...")
 
                             # To recognize a later failover, we set first_start = False now
                             if first_start:
                                 exporter = Exporter()
                                 first_start = False
 
-                            exporter.update_basebackup()
-                            exporter.update_wal_archive()
+                            current_time = time.time()
+                            
+                            # Check if it's time to run basebackup metrics
+                            if current_time - basebackup_last_run >= basebackup_interval_seconds:
+                                logging.info("Running basebackup metrics collection...")
+                                exporter.update_basebackup()
+                                basebackup_last_run = current_time
+                            else:
+                                logging.debug("Skipping basebackup metrics (next run in %s seconds)", 
+                                            basebackup_interval_seconds - (current_time - basebackup_last_run))
+                            
+                            # Check if it's time to run WAL verification
+                            if current_time - wal_verify_last_run >= wal_verify_interval_seconds:
+                                logging.info("Running WAL verification...")
+                                exporter.update_wal_archive()
+                                wal_verify_last_run = current_time
+                            else:
+                                logging.debug("Skipping WAL verification (next run in %s seconds)", 
+                                            wal_verify_interval_seconds - (current_time - wal_verify_last_run))
+                            
+                            # S3 metrics can run every cycle if enabled
                             if s3_metrics_enabled == 'true':
                                 exporter.update_s3_disk_usage()
 
                             logging.info(
-                                "All metrics collected. Waiting for next update cycle... ")
+                                "Metrics collection cycle completed. Waiting for next update cycle... ")
                             time.sleep(wal_g_scrape_interval)
                         else:
                             # If the exporter had run before and run on a replica suddenly, there was
